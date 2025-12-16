@@ -2679,12 +2679,36 @@ bool bt_conn_exists_le(uint8_t id, const bt_addr_le_t *peer)
 
 	if (conn) {
 		/* Connection object already exists.
-		 * If the connection state is not "disconnected",then the
+		 * If the connection state is not "disconnected", then the
 		 * connection was created but has not yet been disconnected.
 		 * If the connection state is "disconnected" then the connection
 		 * still has valid references. The last reference of the stack
 		 * is released after the disconnected callback.
+		 *
+		 * PATCH: Allow reconnection to DISCONNECTED connections.
+		 * When a remote device power cycles, the connection may be stuck
+		 * in DISCONNECTED state. We release references and allow reuse.
+		 * See: https://github.com/zephyrproject-rtos/zephyr/issues/50427
 		 */
+		if (conn->state == BT_CONN_DISCONNECTED) {
+			atomic_val_t refs = atomic_get(&conn->ref);
+			LOG_WRN("Recycling stale disconnected connection (%p) for address %s (refs=%d)",
+				conn, bt_addr_le_str(peer), (int)refs);
+			/* Force-recycle the DISCONNECTED connection slot.
+			 * The connection is stuck with dangling refs that prevent reuse.
+			 * We aggressively reset it to make the slot available.
+			 * See: https://github.com/zephyrproject-rtos/zephyr/issues/50427
+			 */
+			/* Clear all address fields to prevent future lookups */
+			memset(&conn->le.dst, 0, sizeof(conn->le.dst));
+			memset(&conn->le.resp_addr, 0, sizeof(conn->le.resp_addr));
+			memset(&conn->le.init_addr, 0, sizeof(conn->le.init_addr));
+			/* Force ref count to 1 (our lookup ref) then release it */
+			atomic_set(&conn->ref, 1);
+			bt_conn_unref(conn);  /* Now ref becomes 0, slot is free */
+			return false;  /* Allow new connection to be created */
+		}
+
 		LOG_WRN("Found valid connection (%p) with address %s in %s state ", conn,
 			bt_addr_le_str(peer), state2str(conn->state));
 		bt_conn_unref(conn);
